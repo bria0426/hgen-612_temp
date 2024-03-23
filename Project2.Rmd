@@ -1,0 +1,426 @@
+---
+title: "Project2"
+author: "Bria Pierre"
+date: "`r Sys.Date()`"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    theme: 
+      version: 4
+      bootswatch: minty
+    source_code: embed
+---
+```{r setup, include=FALSE}
+# Libraries
+library(tidymodels)
+library(vip)
+library(tidyverse)
+library(readxl)
+library(broom)
+library(car)
+library(ggfortify)
+library(performance)
+library(knitr)
+library(kableExtra)
+library(dplyr)
+# Read in the data (excel file)
+pine_tbl <- read_excel("C:/Users/spier/OneDrive/HGEN612 Data Science II/hgen-612_temp/Data_1993.xlsx", sheet = 1)
+```
+
+# Pine Beetle Data
+A glance at the pine beetle data!
+```{r}
+# Select specific rows from 'pine_tbl'
+subset_data <- pine_tbl %>%
+  select(-`BA_20th`: -IND_BA_Infest_1.5) %>%
+  slice(1:14)
+
+# Create a table
+table <- kable(subset_data, format = "html") %>%
+  kable_styling(full_width = FALSE)
+
+# Display the table
+table
+```
+
+# JPB-Attacked Trees
+### Egan et al, 2016 “Multi-temporal ecological analysis of Jeffrey pine beetle outbreak dynamics within the Lake Tahoe Basin”. 60-acre study area with 10,722 trees followed annually
+```{r JBP Attacked Trees}
+library(ggplot2)
+p.all <- ggplot(data = pine_tbl, aes(x = Easting, y = Northing)) +
+geom_point(aes(color = factor(Response), alpha = factor(Response))) +
+scale_alpha_discrete(range = c(0.5, 1), guide=FALSE)+
+scale_color_manual("",values=c("yellowgreen", "red"),
+labels = c("Alive", "JPB-attacked")) + theme_bw() + xlab("UTM X") + ylab("UTM Y")+
+theme(legend.position = c(0,1), legend.text=element_text(size=15))
+p.all
+```
+
+# Code Book
+
+<div style="text-align:center;">
+  <img src="C:/Users/spier/OneDrive/HGEN612 Data Science II/hgen-612_temp/pine-beetle-variables.png" alt="Pine Beetle Variables" style="width:100%;"/>
+</div>
+
+
+# Simple Linear Regression
+```{r, include=FALSE}
+lm_fit <- lm(DeadDist  ~ Neigh_1.5 + IND_BA_Infest_1 + BA_Inf_20th + Neigh_1, data = pine_tbl)
+
+lm_fit %>%
+  tidy() #estimates, standard errors, statistic, p-value
+#all p-values are significant
+
+lm_fit %>% 
+  glance() #R=squared, adjusted R-squared, df, AIC, BIC, etc
+
+vif(lm_fit) #VIF > 5 implies multicollinearity
+#Neigh_1.5 (11.554) and Neigh_1(11.224)
+
+# * Refit the model without Neigh_1.5 ----
+lm_fit.nc <- lm(DeadDist  ~ IND_BA_Infest_1 + BA_Inf_20th + Neigh_1, data = pine_tbl)
+
+lm_fit.nc %>%
+  tidy()
+
+lm_fit.nc %>% 
+  glance()
+
+vif(lm_fit.nc)
+#IND_BA_Infest_1     BA_Inf_20th       Neigh_1 
+#1.272985             1.042697        1.270008
+
+# * Checking assumptions ----
+check_model(lm_fit)
+check_model(lm_fit.nc) # Really want to look at the residuals
+#Residuals vs Fitted, Normal QQ
+#want residuals to follow the average line
+# * Feature Engineering ----
+# Variable transformation
+pine_tbl <- pine_tbl %>% 
+  mutate(DeadDist_log = log(pine_tbl$DeadDist)) %>% 
+  mutate(DeadDist_sqrt = sqrt(pine_tbl$DeadDist))
+
+#look to see if its normal
+hist(pine_tbl$DeadDist) #skewed right
+hist(pine_tbl$DeadDist_log) #skewed left
+hist(pine_tbl$DeadDist_sqrt) #basically normal, use this
+
+# * Model assumptions: log-transform ----
+lm_fit.nc.log <- lm(DeadDist  ~ IND_BA_Infest_1 + BA_Inf_20th + Neigh_1, data = pine_tbl)
+# autoplot(lm_fit.nc.log, which = 1:2, label.size = 1)+
+#   theme_bw()
+check_model(lm_fit.nc.log)
+
+# * Model assumptions: square-root transform ----
+lm_fit.nc.sqrt <- lm(DeadDist  ~ IND_BA_Infest_1 + BA_Inf_20th + Neigh_1, data = pine_tbl)
+# autoplot(lm_fit.nc.sqrt, which = 1:2, label.size = 1) +
+#   theme_bw()
+check_model(lm_fit.nc.sqrt)
+
+lm_fit.nc.sqrt %>%
+  tidy()
+
+lm_fit.nc.sqrt %>% 
+  glance()
+
+# * Create Recipe ----
+## specify variable relationships
+## specify (training) data
+## feature engineer
+## process recipe on data
+pine_rec <- pine_tbl %>% 
+  recipe(DeadDist  ~ Neigh_1.5 + IND_BA_Infest_1 + BA_Inf_20th + Neigh_1, data = pine_tbl) %>% 
+  step_sqrt(all_outcomes()) %>% #square all fo the DeadDist values
+  step_corr(all_predictors()) #%>% #help with multicollinearity problem
+# prep()    ## we will save the `prep()` for the workflow; recommended
+
+
+# View feature engineered data
+pine_rec %>% 
+  prep() %>% 
+  #juice()
+  bake(new_data = NULL)
+#got rid of Neigh_1
+
+# * Create Model ----
+lm_mod <- 
+  linear_reg() %>% 
+  set_engine("lm")
+
+
+# * Create Workflow ----
+pine_wflow <- 
+  workflow() %>% 
+  add_model(lm_mod) %>% 
+  add_recipe(pine_rec)
+
+pine_wflow
+
+pine_fit <- 
+  pine_wflow %>% 
+  fit(data = pine_tbl)
+
+pine_fit %>% 
+  extract_fit_parsnip() %>% 
+  tidy()
+
+pine_fit %>% 
+  extract_fit_parsnip() %>% 
+  glance()
+
+pine_fit %>% 
+  extract_fit_parsnip() %>% 
+  check_model()
+
+pine_fit %>% 
+  extract_preprocessor()
+
+pine_fit %>% 
+  extract_spec_parsnip()
+```
+### Relationship Between Variables
+```{r}
+ggpairs(pine_tbl[,c("BA_Inf_20th", "DeadDist", "Neigh_1", "IND_BA_Infest_1")],
+diag = list(continuous ="barDiag", discrete = "barDiag", na = "naDiag") )
+```
+
+
+# Ridge Regression
+
+```{r}
+#Ridge 
+# * Create Ridge Regression Model ----
+# penalty == lambda (regulates size of coefficients)
+# mixture == alpha 
+# Note: parsinp allows for a formula method (formula specified in recipe above)
+# Remember that glmnet() require a matrix specification
+
+# Create training/testing data
+pine_split <- initial_split(pine_tbl)
+pine_train <- training(pine_split)
+pine_test <- testing(pine_split)
+
+# Dr. Smirnova's best lambda estimate
+ridge_mod <-
+  linear_reg(mixture = 0, penalty = 0.1629751) %>%  #validation sample or re-sampling can estimate this
+  set_engine("glmnet")
+
+# verify what we are doing
+ridge_mod %>% 
+  translate()
+
+# create a new recipe
+pine_rec <- pine_train %>% 
+  recipe(DeadDist  ~ Neigh_1.5 + IND_BA_Infest_1 + BA_Inf_20th + Neigh_1) %>% 
+  step_sqrt(all_outcomes()) %>% 
+  step_corr(all_predictors()) %>% 
+  step_normalize(all_numeric(), -all_outcomes()) %>% #mean 0, sd 1
+  step_zv(all_numeric(), -all_outcomes()) #%>% 
+# prep()
+
+pine_ridge_wflow <- 
+  workflow() %>% 
+  add_model(ridge_mod) %>% 
+  add_recipe(pine_rec)
+
+pine_ridge_wflow
+
+
+pine_ridge_fit <- 
+  pine_ridge_wflow %>% 
+  fit(data = pine_train)
+
+pine_ridge_fit %>% 
+  extract_fit_parsnip() %>% 
+  tidy()
+
+pine_ridge_fit %>% 
+  extract_preprocessor()
+
+pine_ridge_fit %>% 
+  extract_spec_parsnip()
+
+
+# refit best model on training and evaluate on testing data
+last_fit(
+  pine_ridge_wflow,
+  pine_split
+) %>%
+  collect_metrics()
+
+# verify Ridge Regression performance with standard linear regression approach
+lm(sqrt(DeadDist) ~ Neigh_1.5 + IND_BA_Infest_1 + BA_Inf_20th + Neigh_1, data = pine_tbl) %>% 
+  glance()
+#adjusted r-squared went from 0.747 to 0.734
+```
+
+Column {data-height=400}
+-----------------------------------------------------------------------
+```{r}
+library(ggplot2)
+
+coefficients <- pine_ridge_fit %>% 
+  extract_fit_parsnip() %>% 
+  tidy()
+
+ggplot(coefficients, aes(x = reorder(term, estimate), y = estimate)) +
+  geom_bar(stat = "identity", fill = "skyblue", color = "black") +
+  labs(title = "Ridge Regression Coefficients",
+       x = "Predictors",
+       y = "Coefficient Estimate") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+Column {data-height=400}
+-----------------------------------------------------------------------
+### Adjusted R-Squared
+```{r, Adjusted R-Squared}
+library(flexdashboard)
+
+# Adjusted R-squared value (multiply by 100 to convert to percentage)
+adjusted_r_squared <- 0.734 * 100
+
+# Create a gauge plot
+gauge(adjusted_r_squared, min = 0, max = 100, symbol = '%', gaugeSectors(
+  success = c(80, 100), warning = c(40, 79), danger = c(0, 39)
+))
+```
+
+
+# Lasso Regression
+```{r include=FALSE}
+#Lasso
+# create bootstrap samples for resampling and tuning the penalty parameter
+
+set.seed(1234)
+pine_boot <- bootstraps(pine_train) #re-sampling technique
+
+# create a grid of tuning parameters
+lambda_grid <- grid_regular(penalty(), levels = 50)
+
+lasso_mod <-
+  linear_reg(mixture = 1, penalty = tune()) %>%
+  set_engine("glmnet")
+
+# verify what we are doing
+lasso_mod %>% 
+  translate()
+
+
+# create workflow
+pine_lasso_wflow <- 
+  workflow() %>% 
+  add_model(lasso_mod) %>% 
+  add_recipe(pine_rec)
+
+
+set.seed(2020)
+lasso_grid <- tune_grid(
+  pine_lasso_wflow,
+  resamples = pine_boot,
+  grid = lambda_grid
+)
+
+# let's look at bootstrap results
+lasso_grid %>%
+  collect_metrics()
+
+
+lasso_grid %>%
+  collect_metrics() %>%
+  ggplot(aes(penalty, mean, color = .metric)) +
+  geom_errorbar(aes(
+    ymin = mean - std_err,
+    ymax = mean + std_err
+  ),
+  alpha = 0.5
+  ) +
+  geom_line(size = 1.5) +
+  facet_wrap(~.metric, scales = "free", nrow = 2) +
+  scale_x_log10() +
+  theme(legend.position = "none")
+
+lowest_rmse <- lasso_grid %>%
+  select_best()
+#find the lowest rmse
+
+# update our final model with lowest rmse
+final_lasso <- finalize_workflow(
+  pine_lasso_wflow,
+  lowest_rmse
+)
+
+final_lasso %>% 
+  fit(pine_train) %>%
+  extract_fit_parsnip() %>% 
+  tidy()
+# note that penalty (lambda) is close to zero; hence near equivalent to lm() solution
+
+# variable importance plot
+final_lasso %>%
+  fit(pine_train) %>%
+  pull_workflow_fit() %>%
+  vi(lambda = lowest_rmse$penalty) %>%
+  mutate(
+    Importance = abs(Importance),
+    Variable = fct_reorder(Variable, Importance)
+  ) %>%
+  ggplot(aes(x = Importance, y = Variable, fill = Sign)) +
+  geom_col() +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(y = NULL)
+```
+
+
+Row {data-height=650}
+-------------------------------------
+```{r Lasso Model Coefficients}
+# Final Lasso Model Coefficients
+final_lasso %>% 
+  fit(pine_train) %>%
+  extract_fit_parsnip() %>% 
+  tidy() %>%
+  ggplot(aes(x = term, y = estimate)) +
+  geom_col(fill = "pink", color = "black") +
+  coord_flip() +
+  labs(title = "Final Lasso Model Coefficients",
+       x = "Predictor Variable", y = "Coefficient Estimate") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8))  # Adjust font size for y-axis labels
+```
+
+Row {data-height=350}
+-------------------------------------
+### Importance of the predictors! 
+```{r Importance of Predictors}
+final_lasso %>%
+  fit(pine_train) %>%
+  pull_workflow_fit() %>%
+  vi(lambda = lowest_rmse$penalty) %>%
+  mutate(
+    Importance = abs(Importance),
+    Variable = fct_reorder(Variable, Importance)
+  ) %>%
+  ggplot(aes(x = Importance, y = Variable, fill = Sign)) +
+  geom_col() +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(y = NULL)
+```
+
+
+```{r Plot of RMSE vs. Penalty}
+# Plot of RMSE vs. Penalty
+lasso_grid %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  ggplot(aes(x = penalty, y = mean)) +
+  geom_line(color = "blue") +
+  geom_point(color = "blue") +
+  scale_x_log10() +
+  labs(title = "RMSE vs. Penalty",
+       x = "Penalty (log scale)", y = "RMSE") +
+  theme_minimal()
+```
+
