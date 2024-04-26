@@ -1,0 +1,326 @@
+---
+title: "Heart Attack Analysis & Prediction"
+author: "Bria Pierre"
+date: "`r Sys.Date()`"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+    theme: united
+    source_code: embed
+runtime: shiny
+---
+
+```{r Global, include=FALSE}
+#Load Libraries
+library(forcats)
+library(shiny)
+library(ggplot2)
+library(caret)
+library(janitor)
+library(DT)
+library(tidymodels)
+library(vip)
+library(wesanderson)
+library(flexdashboard)
+library(shinydashboard)
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load and process the dataset
+heart_data <- read.csv("C:/Users/spier/OneDrive/HGEN612 Data Science II/hgen-612_temp/heart.csv", na.strings = "")
+# Rename 'output' to 'heart_disease'
+names(heart_data)[names(heart_data) == "output"] <- "heart_disease"
+#make sure heart disease is a factor
+heart_data$heart_disease <- factor(heart_data$heart_disease, levels = c(0, 1), labels = c("No", "Yes"))
+
+
+# For figure color scheme
+hotel.palette <- wes_palette("GrandBudapest2")
+```
+
+
+Sidebar {.sidebar}
+===========================================================
+
+<br>
+
+`r h3("Objective:")`
+`r h3("Utilize various predictors to forecast the likelihood of heart disease.")`
+
+<br>
+
+- - -
+
+<br>
+
+```{r shiny.inputs, echo=FALSE}
+selectInput(
+  inputId = "chest_pain_type", 
+  label = "Select Chest Pain Type:",
+  choices = c(
+    "Typical Angina" = "1", 
+    "Atypical Angina" = "2", 
+    "Non-anginal Pain" = "3", 
+    "Asymptomatic" = "4"
+  ),
+  selected = "1", 
+  width = NULL
+)
+```
+
+
+```{r data.filtered, echo=FALSE}
+heart_filtered <- reactive({
+  heart_data %>%
+    filter(cp == input$chest_pain_type)
+})
+```
+
+
+```{r data.splitting, echo=FALSE}
+# Data splitting and re-sampling
+set.seed(123)
+
+splits <- reactive({
+  initial_split(heart_filtered(), strata = heart_disease)
+})
+
+heart_other <- reactive({
+  training(splits())
+})
+
+heart_test  <- reactive({
+  testing(splits())
+})
+
+# Create a validation set
+set.seed(234)
+prop.validation <- 0.20
+
+val_set <- reactive({
+  validation_split(heart_other(), 
+                   strata = heart_disease, 
+                   prop   = 1 - prop.validation)
+})
+```
+
+
+
+```{r create.model, echo=FALSE}
+lr_mod <- 
+  logistic_reg(mixture = 1, penalty = tune()) %>% 
+  set_engine("glmnet")
+```
+
+
+```{r create.recipe, echo=FALSE}
+lr_recipe <- reactive({
+  recipe(heart_disease ~ ., data = heart_other) %>% 
+    step_dummy(all_nominal(), -all_outcomes()) %>%
+    step_zv(all_predictors()) %>% 
+    step_normalize(all_predictors())
+})
+```
+
+
+```{r create.workflow, echo=FALSE}
+lr_workflow <- reactive({
+  workflow() %>% 
+  add_model(lr_mod) %>% 
+  add_recipe(lr_recipe())
+})
+```
+
+
+```{r tuning.grid, echo=FALSE}
+# `length.out` will determine how many penalty values are tested in `tune_grid()`
+lr_reg_grid <- tibble(penalty = 10^seq(-4, -1, length.out = 10))  ##30
+
+# Train and tune the model
+lr_tune <- reactive({
+  lr_workflow() %>% 
+  tune_grid(resamples = val_set(), 
+            grid      = lr_reg_grid,
+            control   = control_grid(save_pred = TRUE), #needed to get data for ROC curve
+            metrics   = metric_set(roc_auc))
+})
+
+lr_best <- reactive({
+  lr_tune() %>% 
+  select_best("roc_auc")
+})
+```
+
+
+```{r best.workflow, echo=FALSE}
+lr_workflow_best <- reactive({
+  finalize_workflow(
+  lr_workflow(),
+  lr_best())       #needs to have the same column name as tune()
+})
+```
+
+
+```{r fit.training, echo=FALSE}
+lr_fit <- reactive({
+  lr_workflow_best() %>% 
+  fit(heart_other())
+})
+```
+
+
+```{r last.fit, echo=FALSE}
+lr_last_fit <- reactive({
+  last_fit(
+    lr_workflow_best(),
+    splits())
+})
+```
+
+
+```{r confusion.matrix, echo=FALSE}
+lr_conf_mat <- reactive({
+  lr_last_fit() %>%
+  collect_predictions() %>% 
+  conf_mat(truth = heart_disease, estimate = .pred_class) 
+})
+```
+
+
+Code Book
+===========================================================
+
+<div style="text-align:center;">
+  <img src="C:/Users/spier/OneDrive/HGEN612 Data Science II/hgen-612_temp/heart_codebook.png" alt="Heart COde Book" style="width:71%;"/>
+</div>
+
+Data Table
+===========================================================
+
+### View the Data
+```{r Data Table, echo=FALSE}
+output$data_viewer <- DT::renderDataTable({
+  heart_data %>%
+    datatable(options = list(searching = FALSE,
+                             pageLength = 50,
+                             lengthMenu = c(50, 100),
+                             scrollY = '250px',
+                             scrollX = '300px'),
+              style = "default")
+})
+
+DT::dataTableOutput(outputId = "data_viewer")
+
+```
+
+
+Validation Summary
+===========================================================
+
+
+## Column {data-width="500"}
+
+### Data Splitting
+
+**Total Observations:**  
+`r reactive(dim(heart_filtered())[1] %>% scales::comma())`
+
+**Training Set:**  
+`r reactive(dim(heart_other())[1] %>% scales::comma())`
+
+**Validation Set:**  
+`r reactive((dim(heart_other())[1] * prop.validation) %>% scales::comma())`
+
+**Testing Set:**  
+`r reactive(dim(heart_test())[1] %>% scales::comma())`
+
+
+
+## Column {data-width="500"}
+
+### Case Imbalance Check
+
+```{r, echo=FALSE}
+output$case_plot <- renderPlot({
+  heart_filtered() %>% 
+  ggplot(aes(heart_disease)) +
+    geom_bar(fill = hotel.palette[2])
+})
+
+plotOutput(outputId = "case_plot")
+
+```
+
+
+### Workflow
+
+```{r}
+# Report workflow with optimized `penalty`
+renderPrint(lr_workflow_best())
+```
+
+
+Classification Results
+===========================================================
+
+## Column {data-width="500"}
+
+### ROC
+
+```{r}
+output$lr_auc <- renderPlot({
+  lr_tune() %>%
+  collect_predictions(parameters = lr_best()) %>%
+  roc_curve(heart_disease, .pred_class) %>%
+  ggplot(aes(x = 1 - specificity, y = sensitivity)) +
+  geom_path(color = hotel.palette[4]) +
+  geom_abline(lty = 3, color = hotel.palette[4]) +
+  coord_equal() +
+  theme_classic()
+})
+
+plotOutput(outputId = "lr_auc")
+```
+
+
+### Confusion Matrix
+
+```{r}
+
+output$conf_mat_plot <- renderPlot({
+  # Generate confusion matrix plot
+  lr_conf_mat() %>%
+    autoplot()
+})
+
+plotOutput(outputId = "conf_mat_plot")
+
+```
+
+
+## Column {data-width="500"}
+
+### Variable Importance Plot
+
+```{r}
+output$vip_plot <- renderPlot({
+  lr_fit() %>%
+    extract_fit_parsnip() %>%
+    vip(num_features = 20,
+        aesthetics = list(color = hotel.palette[1], fill = hotel.palette[1], size = 0.3))
+})
+
+plotOutput(outputId = "vip_plot")
+```
+
+### Prediction Metrics
+
+```{r}
+output$metrics <- renderTable({
+  lr_conf_mat() %>%
+    summary() %>%
+    select(-.estimator) 
+})
+
+tableOutput(outputId = "metrics")
+```
